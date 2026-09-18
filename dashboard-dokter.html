@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIPANTAU-DM — Dashboard Dokter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --ink:#142621; --paper:#f1f4f2; --surface:#ffffff; --line:#d8e0dc;
+    --muted:#5b6b66; --accent:#0e6f5c; --accent-soft:#e4f2ee;
+    --danger:#b0393c; --danger-soft:#f8e6e5; --good:#2f7f56; --good-soft:#e6f2ea;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,sans-serif;padding:16px;}
+  .wrap{max-width:640px;margin:0 auto;}
+  h1{font-size:1.3rem;margin:0 0 4px;}
+  p.sub{color:var(--muted);margin:0 0 20px;font-size:0.9rem;}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px;}
+  label{display:block;font-size:0.82rem;color:var(--muted);margin-bottom:5px;margin-top:12px;}
+  label:first-child{margin-top:0;}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:1rem;background:var(--surface);color:var(--ink);}
+  button{width:100%;margin-top:16px;padding:12px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:1rem;font-weight:600;cursor:pointer;}
+  button.secondary{width:auto;padding:6px 12px;font-size:0.8rem;background:transparent;color:var(--accent);border:1px solid var(--accent);}
+  .msg{font-size:0.85rem;margin-top:10px;padding:8px 10px;border-radius:8px;display:none;}
+  .msg.err{background:var(--danger-soft);color:var(--danger);display:block;}
+  [hidden]{display:none!important;}
+  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+  .topbar span{font-size:0.85rem;color:var(--muted);}
+  .pasien-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:12px 14px;border:1px solid var(--line);border-radius:10px;
+    margin-bottom:8px;cursor:pointer;background:var(--surface);
+  }
+  .pasien-row:hover{border-color:var(--accent);}
+  .pasien-info .nama{font-weight:600;font-size:0.95rem;}
+  .pasien-info .sub{font-size:0.78rem;color:var(--muted);margin-top:2px;}
+  .badge{font-size:0.72rem;padding:4px 9px;border-radius:100px;background:var(--good-soft);color:var(--good);white-space:nowrap;}
+  .badge.alert{background:var(--danger-soft);color:var(--danger);}
+  table{width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:10px;}
+  th,td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--line);}
+  th{color:var(--muted);font-weight:500;font-size:0.75rem;text-transform:uppercase;}
+  .empty{color:var(--muted);font-size:0.88rem;text-align:center;padding:20px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login-view">
+    <h1>SIPANTAU-DM</h1>
+    <p class="sub">Dashboard dokter — RSU Allam Medica</p>
+    <div class="card">
+      <label>Nomor HP terdaftar</label>
+      <input id="login-no-hp" type="text" placeholder="628xxxxxxxxxx" autocomplete="off">
+      <label>PIN</label>
+      <input id="login-pin" type="password" inputmode="numeric" placeholder="••••••">
+      <button id="btn-login">Masuk</button>
+      <div id="login-msg" class="msg"></div>
+    </div>
+  </div>
+
+  <div id="list-view" hidden>
+    <div class="topbar">
+      <span id="welcome-text"></span>
+      <button class="secondary" id="btn-logout">Keluar</button>
+    </div>
+    <div class="card">
+      <h1 style="font-size:1.05rem;">Pasien Anda</h1>
+      <div id="daftar-pasien"></div>
+    </div>
+  </div>
+
+  <div id="detail-view" hidden>
+    <div class="topbar">
+      <button class="secondary" id="btn-kembali">← Kembali</button>
+    </div>
+    <div class="card">
+      <h1 id="detail-nama" style="font-size:1.1rem;"></h1>
+      <canvas id="chart-detail" height="180"></canvas>
+      <table id="tabel-detail">
+        <thead><tr><th>Tanggal</th><th>Nilai</th><th>Konteks</th><th>Catatan</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ====== KONFIGURASI — GANTI SEBELUM DIPAKAI ======
+const CONFIG = {
+  FUNCTIONS_URL: "https://GANTI_PROJECT_REF.functions.supabase.co",
+};
+// ==================================================
+
+const KONTEKS_LABEL = { puasa: "Puasa", "2jam_pp": "2 jam PP", sewaktu: "Sewaktu", sebelum_tidur: "Sblm tidur" };
+let sesi = { no_hp: null, pin: null };
+let chart = null;
+
+const $ = (id) => document.getElementById(id);
+
+function tampilkanPesan(el, teks) {
+  el.textContent = teks;
+  el.className = "msg err";
+}
+
+async function panggil(fungsi, body) {
+  const res = await fetch(`${CONFIG.FUNCTIONS_URL}/${fungsi}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Terjadi kesalahan");
+  return data;
+}
+
+$("btn-login").addEventListener("click", async () => {
+  const no_hp = $("login-no-hp").value.trim();
+  const pin = $("login-pin").value.trim();
+  if (!no_hp || !pin) return tampilkanPesan($("login-msg"), "Isi nomor HP dan PIN");
+
+  $("btn-login").disabled = true;
+  try {
+    const data = await panggil("daftar-pasien", { no_hp, pin });
+    sesi = { no_hp, pin };
+    $("welcome-text").textContent = data.nama_staf;
+    $("login-view").hidden = true;
+    $("list-view").hidden = false;
+    renderDaftarPasien(data.pasien);
+  } catch (e) {
+    tampilkanPesan($("login-msg"), e.message);
+  } finally {
+    $("btn-login").disabled = false;
+  }
+});
+
+$("btn-logout").addEventListener("click", () => {
+  sesi = { no_hp: null, pin: null };
+  $("list-view").hidden = true;
+  $("login-view").hidden = false;
+  $("login-pin").value = "";
+});
+
+$("btn-kembali").addEventListener("click", () => {
+  $("detail-view").hidden = true;
+  $("list-view").hidden = false;
+});
+
+function renderDaftarPasien(daftar) {
+  const el = $("daftar-pasien");
+  el.innerHTML = "";
+  if (!daftar.length) {
+    el.innerHTML = '<div class="empty">Belum ada pasien terhubung ke akun ini.</div>';
+    return;
+  }
+  daftar.forEach((p) => {
+    const row = document.createElement("div");
+    row.className = "pasien-row";
+    const terakhir = p.pembacaan_terakhir
+      ? `${p.pembacaan_terakhir.nilai_mg_dl} mg/dL · ${KONTEKS_LABEL[p.pembacaan_terakhir.konteks] || p.pembacaan_terakhir.konteks}`
+      : "Belum ada data";
+    row.innerHTML = `
+      <div class="pasien-info">
+        <div class="nama">${p.nama} <span style="color:var(--muted);font-weight:400;">(${p.no_rm})</span></div>
+        <div class="sub">${terakhir}</div>
+      </div>
+      <div class="badge ${p.alert_7hari > 0 ? "alert" : ""}">${p.alert_7hari > 0 ? p.alert_7hari + " alert/7hr" : "Stabil"}</div>
+    `;
+    row.addEventListener("click", () => bukaDetail(p.no_rm, p.nama));
+    el.appendChild(row);
+  });
+}
+
+async function bukaDetail(no_rm, nama) {
+  $("detail-nama").textContent = nama;
+  $("list-view").hidden = true;
+  $("detail-view").hidden = false;
+  try {
+    const data = await panggil("riwayat-pasien", { peran: "staf", no_hp: sesi.no_hp, pin: sesi.pin, no_rm, hari: 30 });
+    renderDetail(data.riwayat);
+  } catch (e) {
+    $("tabel-detail").querySelector("tbody").innerHTML = `<tr><td colspan="4">${e.message}</td></tr>`;
+  }
+}
+
+function renderDetail(riwayat) {
+  const tbody = $("tabel-detail").querySelector("tbody");
+  tbody.innerHTML = "";
+  [...riwayat].reverse().forEach((r) => {
+    const tr = document.createElement("tr");
+    const tgl = new Date(r.waktu_ukur).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    tr.innerHTML = `<td>${tgl}</td><td>${r.nilai_mg_dl} mg/dL</td><td>${KONTEKS_LABEL[r.konteks] || r.konteks}</td><td>${r.catatan || "-"}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const labels = riwayat.map((r) => new Date(r.waktu_ukur).toLocaleDateString("id-ID", { day: "2-digit", month: "short" }));
+  const nilai = riwayat.map((r) => r.nilai_mg_dl);
+
+  if (chart) chart.destroy();
+  chart = new Chart($("chart-detail"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Gula darah (mg/dL)",
+        data: nilai,
+        borderColor: "#0e6f5c",
+        backgroundColor: "rgba(14,111,92,0.12)",
+        tension: 0.25,
+        fill: true,
+        pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: false } },
+    },
+  });
+}
+</script>
+</body>
+</html>

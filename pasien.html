@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIPANTAU-DM — Pasien</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --ink:#142621; --paper:#f1f4f2; --surface:#ffffff; --line:#d8e0dc;
+    --muted:#5b6b66; --accent:#0e6f5c; --accent-soft:#e4f2ee;
+    --danger:#b0393c; --danger-soft:#f8e6e5; --good:#2f7f56;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,sans-serif;padding:16px;}
+  .wrap{max-width:480px;margin:0 auto;}
+  h1{font-size:1.3rem;margin:0 0 4px;}
+  p.sub{color:var(--muted);margin:0 0 20px;font-size:0.9rem;}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px;}
+  label{display:block;font-size:0.82rem;color:var(--muted);margin-bottom:5px;margin-top:12px;}
+  label:first-child{margin-top:0;}
+  input,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:1rem;background:var(--surface);color:var(--ink);}
+  button{width:100%;margin-top:16px;padding:12px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:1rem;font-weight:600;cursor:pointer;}
+  button:disabled{opacity:0.6;cursor:default;}
+  button.secondary{background:transparent;color:var(--accent);border:1px solid var(--accent);}
+  .msg{font-size:0.85rem;margin-top:10px;padding:8px 10px;border-radius:8px;display:none;}
+  .msg.err{background:var(--danger-soft);color:var(--danger);display:block;}
+  .msg.ok{background:var(--accent-soft);color:var(--accent);display:block;}
+  [hidden]{display:none!important;}
+  table{width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:10px;}
+  th,td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--line);}
+  th{color:var(--muted);font-weight:500;font-size:0.75rem;text-transform:uppercase;}
+  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+  .topbar span{font-size:0.85rem;color:var(--muted);}
+  canvas{max-width:100%;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login-view">
+    <h1>SIPANTAU-DM</h1>
+    <p class="sub">Pencatatan gula darah mandiri — RSU Allam Medica</p>
+    <div class="card">
+      <label>Nomor Rekam Medis</label>
+      <input id="login-no-rm" type="text" placeholder="00-12-34" autocomplete="off">
+      <label>PIN</label>
+      <input id="login-pin" type="password" inputmode="numeric" placeholder="••••••">
+      <button id="btn-login">Masuk</button>
+      <div id="login-msg" class="msg"></div>
+    </div>
+  </div>
+
+  <div id="app-view" hidden>
+    <div class="topbar">
+      <span id="welcome-text"></span>
+      <button class="secondary" style="width:auto;padding:6px 12px;font-size:0.8rem;" id="btn-logout">Keluar</button>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:1.05rem;">Catat gula darah</h1>
+      <label>Nilai (mg/dL)</label>
+      <input id="input-nilai" type="number" inputmode="numeric" placeholder="mis. 110">
+      <label>Konteks pengukuran</label>
+      <select id="input-konteks">
+        <option value="puasa">Puasa</option>
+        <option value="2jam_pp">2 jam setelah makan</option>
+        <option value="sewaktu">Sewaktu</option>
+        <option value="sebelum_tidur">Sebelum tidur</option>
+      </select>
+      <label>Catatan (opsional)</label>
+      <input id="input-catatan" type="text" placeholder="mis. habis olahraga">
+      <button id="btn-simpan">Simpan</button>
+      <div id="simpan-msg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:1.05rem;">Riwayat 30 hari terakhir</h1>
+      <canvas id="chart-riwayat" height="180"></canvas>
+      <table id="tabel-riwayat">
+        <thead><tr><th>Tanggal</th><th>Nilai</th><th>Konteks</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ====== KONFIGURASI — GANTI SEBELUM DIPAKAI ======
+const CONFIG = {
+  FUNCTIONS_URL: "https://GANTI_PROJECT_REF.functions.supabase.co",
+};
+// ==================================================
+
+const KONTEKS_LABEL = { puasa: "Puasa", "2jam_pp": "2 jam PP", sewaktu: "Sewaktu", sebelum_tidur: "Sblm tidur" };
+
+let sesi = { no_rm: null, pin: null };
+let chart = null;
+
+const $ = (id) => document.getElementById(id);
+
+function tampilkanPesan(el, teks, tipe) {
+  el.textContent = teks;
+  el.className = "msg " + tipe;
+}
+
+async function panggil(fungsi, body) {
+  const res = await fetch(`${CONFIG.FUNCTIONS_URL}/${fungsi}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Terjadi kesalahan");
+  return data;
+}
+
+function muatSesi() {
+  try {
+    const no_rm = localStorage.getItem("sipantau_no_rm");
+    if (no_rm) sesi.no_rm = no_rm;
+  } catch (_e) { /* localStorage tidak tersedia, lanjut tanpa isi otomatis */ }
+}
+
+$("btn-login").addEventListener("click", async () => {
+  const no_rm = $("login-no-rm").value.trim();
+  const pin = $("login-pin").value.trim();
+  if (!no_rm || !pin) return tampilkanPesan($("login-msg"), "Isi nomor RM dan PIN", "err");
+
+  $("btn-login").disabled = true;
+  try {
+    const data = await panggil("riwayat-pasien", { peran: "pasien", no_rm, pin, hari: 30 });
+    sesi = { no_rm, pin };
+    try { localStorage.setItem("sipantau_no_rm", no_rm); } catch (_e) {}
+    $("welcome-text").textContent = data.nama_pasien;
+    $("login-view").hidden = true;
+    $("app-view").hidden = false;
+    renderRiwayat(data.riwayat);
+  } catch (e) {
+    tampilkanPesan($("login-msg"), e.message, "err");
+  } finally {
+    $("btn-login").disabled = false;
+  }
+});
+
+$("btn-logout").addEventListener("click", () => {
+  sesi = { no_rm: null, pin: null };
+  $("app-view").hidden = true;
+  $("login-view").hidden = false;
+  $("login-pin").value = "";
+});
+
+$("btn-simpan").addEventListener("click", async () => {
+  const nilai_mg_dl = parseInt($("input-nilai").value, 10);
+  const konteks = $("input-konteks").value;
+  const catatan = $("input-catatan").value.trim();
+  if (!nilai_mg_dl) return tampilkanPesan($("simpan-msg"), "Isi nilai gula darah", "err");
+
+  $("btn-simpan").disabled = true;
+  try {
+    const data = await panggil("simpan-pembacaan", {
+      no_rm: sesi.no_rm, pin: sesi.pin, nilai_mg_dl, konteks, catatan,
+    });
+    tampilkanPesan(
+      $("simpan-msg"),
+      data.alert ? "Tersimpan — nilai di luar rentang aman, pesan WhatsApp telah dikirim." : "Tersimpan.",
+      data.alert ? "err" : "ok"
+    );
+    $("input-nilai").value = "";
+    $("input-catatan").value = "";
+    const riwayat = await panggil("riwayat-pasien", { peran: "pasien", no_rm: sesi.no_rm, pin: sesi.pin, hari: 30 });
+    renderRiwayat(riwayat.riwayat);
+  } catch (e) {
+    tampilkanPesan($("simpan-msg"), e.message, "err");
+  } finally {
+    $("btn-simpan").disabled = false;
+  }
+});
+
+function renderRiwayat(riwayat) {
+  const tbody = $("tabel-riwayat").querySelector("tbody");
+  tbody.innerHTML = "";
+  [...riwayat].reverse().forEach((r) => {
+    const tr = document.createElement("tr");
+    const tgl = new Date(r.waktu_ukur).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    tr.innerHTML = `<td>${tgl}</td><td>${r.nilai_mg_dl} mg/dL</td><td>${KONTEKS_LABEL[r.konteks] || r.konteks}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const labels = riwayat.map((r) => new Date(r.waktu_ukur).toLocaleDateString("id-ID", { day: "2-digit", month: "short" }));
+  const nilai = riwayat.map((r) => r.nilai_mg_dl);
+
+  if (chart) chart.destroy();
+  chart = new Chart($("chart-riwayat"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Gula darah (mg/dL)",
+        data: nilai,
+        borderColor: "#0e6f5c",
+        backgroundColor: "rgba(14,111,92,0.12)",
+        tension: 0.25,
+        fill: true,
+        pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: false } },
+    },
+  });
+}
+
+muatSesi();
+if (sesi.no_rm) $("login-no-rm").value = sesi.no_rm;
+</script>
+</body>
+</html>
